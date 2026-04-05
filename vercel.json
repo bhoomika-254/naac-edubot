@@ -3,11 +3,6 @@
   "version": 2,
   "buildCommand": "npm --prefix apps/web run build",
   "outputDirectory": "apps/web/build",
-  "functions": {
-    "api/[...path].py": {
-      "maxDuration": 60
-    }
-  },
   "rewrites": [
     {
       "source": "/api/(.*)",
