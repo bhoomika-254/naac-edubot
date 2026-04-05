@@ -5,7 +5,7 @@
   "outputDirectory": "apps/web/build",
   "functions": {
     "api/[...path].py": {
-      "runtime": "python3.11"
+      "maxDuration": 60
     }
   },
   "rewrites": [
