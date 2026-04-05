@@ -1,1 +1,35 @@
--r ../requirements.txt
+# Vercel's parser for api/requirements.txt may reject include syntax like "-r ../requirements.txt".
+# Keep this file in sync with ../requirements.txt.
+
+# Core Framework
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.12.5
+pydantic-settings==2.13.1
+
+# RAG Components
+sentence-transformers==2.7.0
+
+# LLM Integration
+groq>=0.18.0
+huggingface-hub==0.33.4
+requests==2.31.0
+
+# Document Processing
+pdfplumber==0.10.3
+pypdf2==3.0.1
+pdfminer.six==20221105
+python-multipart==0.0.6
+
+# Vector math helpers
+numpy==2.4.4
+psycopg2-binary==2.9.11
+
+# Web Scraping for Updates
+beautifulsoup4==4.12.2
+
+# Environment Management
+python-dotenv==1.0.0
+
+# Testing
+pytest==8.2.2
