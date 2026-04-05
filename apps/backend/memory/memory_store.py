@@ -240,15 +240,18 @@ class ConversationMemoryStore:
             emb_str = self._to_vector_literal(query_embedding)
             cur.execute(
                 f"""
-                SELECT role, content, metadata, created_at, (embedding <=> %s::vector) AS distance
-                FROM {self.long_table}
-                WHERE tenant_id = %s AND user_id = %s AND conversation_id = %s
-                  AND expires_at > now()
-                ORDER BY embedding <=> %s::vector
+                                WITH scoped AS MATERIALIZED (
+                                        SELECT role, content, metadata, created_at, embedding
+                                        FROM {self.long_table}
+                                        WHERE tenant_id = %s AND user_id = %s AND conversation_id = %s
+                                            AND expires_at > now()
+                                )
+                                SELECT role, content, metadata, created_at, (embedding <=> %s::vector) AS distance
+                                FROM scoped
+                                ORDER BY distance
                 LIMIT %s;
                 """,
                 (
-                    emb_str,
                     identity.tenant_id,
                     identity.user_id,
                     identity.conversation_id,
