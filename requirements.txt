@@ -3,8 +3,8 @@
 # Core Framework
 fastapi==0.104.1
 uvicorn==0.24.0
-pydantic==2.8.2
-pydantic-settings==2.2.1
+pydantic==2.12.5
+pydantic-settings==2.13.1
 
 # RAG Components
 # Align sentence-transformers with latest huggingface_hub to avoid cached_download import errors
@@ -22,7 +22,7 @@ pdfminer.six==20221105
 python-multipart==0.0.6
 
 # Vector math helpers
-numpy==2.1.3
+numpy==2.4.4
 psycopg2-binary==2.9.11
 
 # Scheduling (removed scheduler feature; keep dependency list clean)
