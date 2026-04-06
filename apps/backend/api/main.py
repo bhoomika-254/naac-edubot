@@ -160,14 +160,19 @@ async def lifespan(app: FastAPI):
     """Application lifespan management"""
     # Startup
     logger.info("Starting NAAC Compliance Intelligence System")
-    
+
     try:
         await initialize_system()
         logger.info("System initialized successfully")
-        yield
     except Exception as e:
-        logger.error(f"Failed to initialize system: {e}")
-        raise
+        logger.exception(
+            "Failed to initialize all components at startup (%s). "
+            "Continuing in degraded mode so auth/health endpoints remain available.",
+            e,
+        )
+
+    yield
+
     finally:
         # Shutdown
         logger.info("Shutting down NAAC Compliance Intelligence System")
