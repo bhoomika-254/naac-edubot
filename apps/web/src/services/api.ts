@@ -16,11 +16,16 @@ import {
 
 const SUPABASE_STAGED_PREFIX = 'supabase://'
 const SUPABASE_URL = String(import.meta.env.VITE_SUPABASE_URL || '').trim().replace(/\/+$/, '')
-const SUPABASE_ANON_KEY = String(import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim()
+const SUPABASE_BROWSER_KEY = String(
+  import.meta.env.VITE_SUPABASE_ANON_KEY ||
+  import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+  ''
+).trim()
 const SUPABASE_UPLOAD_BUCKET = String(import.meta.env.VITE_SUPABASE_UPLOAD_BUCKET || 'edubot-uploads').trim()
+const SUPABASE_BROWSER_KEY_IS_JWT = SUPABASE_BROWSER_KEY.split('.').length === 3
 
 const DIRECT_SUPABASE_UPLOAD_ENABLED =
-  Boolean(SUPABASE_URL) && Boolean(SUPABASE_ANON_KEY) && Boolean(SUPABASE_UPLOAD_BUCKET)
+  Boolean(SUPABASE_URL) && Boolean(SUPABASE_BROWSER_KEY) && Boolean(SUPABASE_UPLOAD_BUCKET)
 
 class ApiService {
   private api: AxiosInstance
@@ -32,7 +37,8 @@ class ApiService {
 
     const apiError: ApiError = {
       detail:
-        'Direct Supabase upload is not configured. Set VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, and VITE_SUPABASE_UPLOAD_BUCKET in Vercel environment variables.',
+        'Direct Supabase upload is not configured. Set VITE_SUPABASE_URL, ' +
+        'VITE_SUPABASE_UPLOAD_BUCKET, and one of VITE_SUPABASE_ANON_KEY or VITE_SUPABASE_PUBLISHABLE_KEY in Vercel environment variables.',
       status_code: 500,
       timestamp: new Date().toISOString(),
     }
@@ -71,14 +77,18 @@ class ApiService {
     const encodedPath = this.encodeStoragePath(objectPath)
     const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${encodedBucket}/${encodedPath}`
 
+    const uploadHeaders: Record<string, string> = {
+      apikey: SUPABASE_BROWSER_KEY,
+      'Content-Type': 'application/pdf',
+      'x-upsert': 'false',
+    }
+    if (SUPABASE_BROWSER_KEY_IS_JWT) {
+      uploadHeaders.Authorization = `Bearer ${SUPABASE_BROWSER_KEY}`
+    }
+
     const response = await fetch(uploadUrl, {
       method: 'POST',
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-        'Content-Type': 'application/pdf',
-        'x-upsert': 'false',
-      },
+      headers: uploadHeaders,
       body: file,
     })
 
@@ -99,7 +109,7 @@ class ApiService {
       const apiError: ApiError = {
         detail:
           `Failed to upload directly to Supabase Storage: ${detail}. ` +
-          'Confirm bucket policies allow upload with your anon key.',
+          'Confirm bucket insert policy for anon and verify the browser key belongs to the same Supabase project.',
         status_code: response.status,
         timestamp: new Date().toISOString(),
       }
