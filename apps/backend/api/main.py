@@ -167,16 +167,16 @@ async def lifespan(app: FastAPI):
     logger.info("Starting NAAC Compliance Intelligence System")
 
     try:
-        try:
-            await initialize_system()
-            logger.info("System initialized successfully")
-        except Exception as e:
-            logger.exception(
-                "Failed to initialize all components at startup (%s). "
-                "Continuing in degraded mode so auth/health endpoints remain available.",
-                e,
-            )
+        await initialize_system()
+        logger.info("System initialized successfully")
+    except Exception as e:
+        logger.exception(
+            "Failed to initialize all components at startup (%s). "
+            "Continuing in degraded mode so auth/health endpoints remain available.",
+            e,
+        )
 
+    try:
         yield
     finally:
         # Shutdown
