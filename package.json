@@ -6,6 +6,7 @@
     "apps/web"
   ],
   "scripts": {
+    "dev": "npx concurrently -k -n WEB,API -c cyan,green \"npm --prefix apps/web run dev\" \"python -m apps.backend.run_server\"",
     "dev:web": "npm --prefix apps/web run dev",
     "build:web": "npm --prefix apps/web run build",
     "test:web": "npm --prefix apps/web test",
