@@ -14,6 +14,10 @@ import {
   ApiError
 } from '../types'
 
+const MAX_SERVERLESS_UPLOAD_BYTES = 4 * 1024 * 1024
+
+const formatMb = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(2)} MB`
+
 class ApiService {
   private api: AxiosInstance
 
@@ -107,8 +111,17 @@ class ApiService {
           return this.api.request(retryConfig)
         }
 
+        const responseData = error?.response?.data
+        let detail = responseData?.detail || responseData?.error?.message || error.message || 'Unknown error'
+
+        if (error?.response?.status === 413) {
+          detail =
+            'This PDF is too large for Vercel serverless upload limits (~4 MB request body with multipart overhead). ' +
+            'Please compress the PDF or split it into smaller parts, then upload again.'
+        }
+
         const apiError: ApiError = {
-          detail: error.response?.data?.detail || error.message || 'Unknown error',
+          detail,
           status_code: error.response?.status || 500,
           timestamp: new Date().toISOString(),
         }
@@ -152,6 +165,18 @@ class ApiService {
   }
 
   async uploadDocument(file: File, documentType: 'naac_requirement' | 'mvsr_evidence'): Promise<UploadResponse> {
+    if (file.size > MAX_SERVERLESS_UPLOAD_BYTES) {
+      const apiError: ApiError = {
+        detail:
+          `Selected PDF is ${formatMb(file.size)}, which exceeds the serverless upload limit ` +
+          `(${formatMb(MAX_SERVERLESS_UPLOAD_BYTES)} safe limit). ` +
+          'Compress or split this PDF and retry.',
+        status_code: 413,
+        timestamp: new Date().toISOString(),
+      }
+      return Promise.reject(apiError)
+    }
+
     const formData = new FormData()
     formData.append('file', file)
     formData.append('document_type', documentType)
