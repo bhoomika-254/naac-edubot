@@ -39,7 +39,12 @@ from ..llm.groq_client import GroqClient
 from ..memory.memory_store import ConversationMemoryStore, MemoryIdentity
 from ..ingestion.ingest import DocumentIngestionPipeline
 from ..updater.auto_ingest import NAACAutoIngest
-from ..scheduler.update_scheduler import NAACUpdateScheduler
+try:
+    from ..scheduler.update_scheduler import NAACUpdateScheduler  # type: ignore[attr-defined]
+    SCHEDULER_IMPORT_ERROR = None
+except Exception as import_exc:  # pragma: no cover - optional dependency
+    NAACUpdateScheduler = None  # type: ignore[assignment]
+    SCHEDULER_IMPORT_ERROR = import_exc
 from ..config.settings import get_settings
 from ..auth.auth import authenticate, logout, get_session_info
 
@@ -57,7 +62,7 @@ logger = logging.getLogger(__name__)
 # Global system components (initialized on startup)
 rag_pipeline: Optional[RAGPipeline] = None
 auto_ingest: Optional[NAACAutoIngest] = None
-scheduler: Optional[NAACUpdateScheduler] = None
+scheduler: Optional[Any] = None
 metadata_mapper: Optional[NAACMetadataMapper] = None
 vector_store_instance: Optional[Any] = None
 memory_store_instance: Optional[ConversationMemoryStore] = None
@@ -162,17 +167,17 @@ async def lifespan(app: FastAPI):
     logger.info("Starting NAAC Compliance Intelligence System")
 
     try:
-        await initialize_system()
-        logger.info("System initialized successfully")
-    except Exception as e:
-        logger.exception(
-            "Failed to initialize all components at startup (%s). "
-            "Continuing in degraded mode so auth/health endpoints remain available.",
-            e,
-        )
+        try:
+            await initialize_system()
+            logger.info("System initialized successfully")
+        except Exception as e:
+            logger.exception(
+                "Failed to initialize all components at startup (%s). "
+                "Continuing in degraded mode so auth/health endpoints remain available.",
+                e,
+            )
 
-    yield
-
+        yield
     finally:
         # Shutdown
         logger.info("Shutting down NAAC Compliance Intelligence System")
@@ -329,8 +334,15 @@ async def initialize_system():
                 chroma_store=vector_store,
                 ingestion_pipeline=ingestion_pipeline,
             )
-            scheduler = NAACUpdateScheduler(auto_ingest=auto_ingest)
-            scheduler.start()
+            if NAACUpdateScheduler is None:
+                scheduler = None
+                logger.warning(
+                    "Auto-ingest requested but scheduler dependencies are unavailable: %s",
+                    SCHEDULER_IMPORT_ERROR,
+                )
+            else:
+                scheduler = NAACUpdateScheduler(auto_ingest=auto_ingest)
+                scheduler.start()
         elif settings.auto_ingest_enabled and settings.is_serverless_runtime():
             auto_ingest = None
             scheduler = None
