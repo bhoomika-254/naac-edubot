@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     job_store_url: str = Field("sqlite:///jobs.sqlite", env="JOB_STORE_URL")
     vector_backend: str = Field("supabase", env="VECTOR_BACKEND")
     supabase_db_url: Optional[str] = Field(None, env="SUPABASE_DB_URL")
+    supabase_url: Optional[str] = Field(None, env="SUPABASE_URL")
+    supabase_service_role_key: Optional[str] = Field(None, env="SUPABASE_SERVICE_ROLE_KEY")
+    supabase_storage_bucket: str = Field("edubot-uploads", env="SUPABASE_STORAGE_BUCKET")
     supabase_table: str = Field("chunks", env="SUPABASE_TABLE")
     embedding_dim: int = Field(384, env="EMBEDDING_DIM")
     

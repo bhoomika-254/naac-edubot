@@ -14,12 +14,100 @@ import {
   ApiError
 } from '../types'
 
-const MAX_SERVERLESS_UPLOAD_BYTES = 4 * 1024 * 1024
+const SUPABASE_STAGED_PREFIX = 'supabase://'
+const SUPABASE_URL = String(import.meta.env.VITE_SUPABASE_URL || '').trim().replace(/\/+$/, '')
+const SUPABASE_ANON_KEY = String(import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim()
+const SUPABASE_UPLOAD_BUCKET = String(import.meta.env.VITE_SUPABASE_UPLOAD_BUCKET || 'edubot-uploads').trim()
 
-const formatMb = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(2)} MB`
+const DIRECT_SUPABASE_UPLOAD_ENABLED =
+  Boolean(SUPABASE_URL) && Boolean(SUPABASE_ANON_KEY) && Boolean(SUPABASE_UPLOAD_BUCKET)
 
 class ApiService {
   private api: AxiosInstance
+
+  private ensureDirectUploadConfigured(): void {
+    if (DIRECT_SUPABASE_UPLOAD_ENABLED) {
+      return
+    }
+
+    const apiError: ApiError = {
+      detail:
+        'Direct Supabase upload is not configured. Set VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, and VITE_SUPABASE_UPLOAD_BUCKET in Vercel environment variables.',
+      status_code: 500,
+      timestamp: new Date().toISOString(),
+    }
+    throw apiError
+  }
+
+  private sanitizeFileName(fileName: string): string {
+    const trimmed = String(fileName || 'uploaded.pdf').trim() || 'uploaded.pdf'
+    const lower = trimmed.toLowerCase()
+    return lower.replace(/[^a-z0-9._-]+/g, '_')
+  }
+
+  private buildSupabaseObjectPath(documentType: 'naac_requirement' | 'mvsr_evidence', fileName: string): string {
+    const stamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)
+    const nonce = Math.random().toString(36).slice(2, 10)
+    const safeName = this.sanitizeFileName(fileName)
+    return `${documentType}/${stamp}_${nonce}_${safeName}`
+  }
+
+  private encodeStoragePath(path: string): string {
+    return String(path || '')
+      .split('/')
+      .map((segment) => encodeURIComponent(segment))
+      .join('/')
+  }
+
+  private async uploadToSupabaseStorage(
+    file: File,
+    documentType: 'naac_requirement' | 'mvsr_evidence'
+  ): Promise<{ bucket: string; objectPath: string }> {
+    this.ensureDirectUploadConfigured()
+
+    const bucket = SUPABASE_UPLOAD_BUCKET
+    const objectPath = this.buildSupabaseObjectPath(documentType, file.name)
+    const encodedBucket = encodeURIComponent(bucket)
+    const encodedPath = this.encodeStoragePath(objectPath)
+    const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${encodedBucket}/${encodedPath}`
+
+    const response = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+        'Content-Type': 'application/pdf',
+        'x-upsert': 'false',
+      },
+      body: file,
+    })
+
+    if (!response.ok) {
+      let detail = `Supabase upload failed with status ${response.status}`
+      try {
+        const payload = await response.json()
+        detail = payload?.error || payload?.message || detail
+      } catch {
+        try {
+          const text = await response.text()
+          if (text) detail = text
+        } catch {
+          // noop
+        }
+      }
+
+      const apiError: ApiError = {
+        detail:
+          `Failed to upload directly to Supabase Storage: ${detail}. ` +
+          'Confirm bucket policies allow upload with your anon key.',
+        status_code: response.status,
+        timestamp: new Date().toISOString(),
+      }
+      throw apiError
+    }
+
+    return { bucket, objectPath }
+  }
 
   private shouldAttachAuth(url?: string): boolean {
     const raw = String(url || '').trim()
@@ -30,6 +118,7 @@ class ApiService {
     // Upload + ingest routes are intentionally unauthenticated on the backend.
     // Avoid sending a stale bearer token that can trigger intermittent 401s.
     if (normalized === '/upload' || normalized.startsWith('/upload?')) return false
+    if (normalized === '/upload/reference' || normalized.startsWith('/upload/reference?')) return false
     if (normalized === '/ingest' || normalized.startsWith('/ingest?')) return false
     if (normalized === '/ingest/status' || normalized.startsWith('/ingest/status?')) return false
 
@@ -93,6 +182,8 @@ class ApiService {
         const isUploadOrIngestRoute =
           requestUrl === '/upload' ||
           requestUrl.startsWith('/upload?') ||
+          requestUrl === '/upload/reference' ||
+          requestUrl.startsWith('/upload/reference?') ||
           requestUrl === '/ingest' ||
           requestUrl.startsWith('/ingest?') ||
           requestUrl === '/ingest/status' ||
@@ -116,7 +207,7 @@ class ApiService {
 
         if (error?.response?.status === 413) {
           detail =
-            'This PDF is too large for Vercel serverless upload limits (~4 MB request body with multipart overhead). ' +
+            'The uploaded payload is too large for the current gateway/storage limits. ' +
             'Please compress the PDF or split it into smaller parts, then upload again.'
         }
 
@@ -165,27 +256,29 @@ class ApiService {
   }
 
   async uploadDocument(file: File, documentType: 'naac_requirement' | 'mvsr_evidence'): Promise<UploadResponse> {
-    if (file.size > MAX_SERVERLESS_UPLOAD_BYTES) {
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
       const apiError: ApiError = {
-        detail:
-          `Selected PDF is ${formatMb(file.size)}, which exceeds the serverless upload limit ` +
-          `(${formatMb(MAX_SERVERLESS_UPLOAD_BYTES)} safe limit). ` +
-          'Compress or split this PDF and retry.',
-        status_code: 413,
+        detail: 'Only PDF files are supported.',
+        status_code: 400,
         timestamp: new Date().toISOString(),
       }
       return Promise.reject(apiError)
     }
 
-    const formData = new FormData()
-    formData.append('file', file)
-    formData.append('document_type', documentType)
+    const { bucket, objectPath } = await this.uploadToSupabaseStorage(file, documentType)
 
-    const response: AxiosResponse<UploadResponse> = await this.api.post('/upload', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
+    const response: AxiosResponse<UploadResponse> = await this.api.post('/upload/reference', {
+      filename: file.name,
+      file_size: file.size,
+      document_type: documentType,
+      bucket,
+      object_path: objectPath,
     })
+
+    // Ensure staged path always encodes bucket/object for downstream ingest.
+    if (!response.data.stored_path) {
+      response.data.stored_path = `${SUPABASE_STAGED_PREFIX}${bucket}/${objectPath}`
+    }
     return response.data
   }
 

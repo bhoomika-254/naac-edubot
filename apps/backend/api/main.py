@@ -10,11 +10,13 @@ from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
 import logging
 import asyncio
+import requests
 from datetime import datetime
 from pathlib import Path
 import os
 from contextlib import asynccontextmanager
 from threading import Lock
+from urllib.parse import quote
 from uuid import uuid4
 
 # Import our system components
@@ -74,6 +76,7 @@ ACTIVE_INGEST_STATUSES = {"queued", "processing"}
 staged_upload_store: Dict[str, Dict[str, Any]] = {}
 staged_upload_lock = Lock()
 STAGED_UPLOAD_PREFIX = "memory://upload/"
+SUPABASE_STAGED_PREFIX = "supabase://"
 
 
 def _resolve_project_root() -> Path:
@@ -138,6 +141,14 @@ class UploadResponse(BaseModel):
     document_type: str = Field(..., description="Document type associated with the file")
     file_size: int = Field(..., description="Uploaded file size in bytes")
     timestamp: str = Field(..., description="Upload completion timestamp")
+
+
+class UploadReferenceRequest(BaseModel):
+    filename: str = Field(..., description="Original uploaded filename")
+    file_size: int = Field(..., ge=0, description="Uploaded file size in bytes")
+    document_type: str = Field(..., description="Document type for ingestion")
+    bucket: Optional[str] = Field(None, description="Supabase storage bucket")
+    object_path: str = Field(..., description="Supabase storage object path")
 
 
 class StagedUploadDeleteRequest(BaseModel):
@@ -448,9 +459,93 @@ def _is_staged_upload_token(file_path: str) -> bool:
     return str(file_path or "").strip().startswith(STAGED_UPLOAD_PREFIX)
 
 
+def _is_supabase_storage_token(file_path: str) -> bool:
+    return str(file_path or "").strip().startswith(SUPABASE_STAGED_PREFIX)
+
+
+def _is_virtual_ingestion_path(file_path: str) -> bool:
+    return _is_staged_upload_token(file_path) or _is_supabase_storage_token(file_path)
+
+
 def _create_staged_upload_token(filename: str) -> str:
     safe_name = Path(filename or "uploaded.pdf").name
     return f"{STAGED_UPLOAD_PREFIX}{uuid4().hex}/{safe_name}"
+
+
+def _create_supabase_storage_token(bucket: str, object_path: str) -> str:
+    safe_bucket = str(bucket or "").strip()
+    safe_path = str(object_path or "").strip().lstrip("/")
+    if not safe_bucket or not safe_path:
+        raise ValueError("Both bucket and object_path are required for Supabase storage tokens")
+    return f"{SUPABASE_STAGED_PREFIX}{safe_bucket}/{safe_path}"
+
+
+def _parse_supabase_storage_token(token: str) -> tuple[str, str]:
+    raw = str(token or "").strip()
+    if not _is_supabase_storage_token(raw):
+        raise ValueError("Not a Supabase storage token")
+
+    payload = raw[len(SUPABASE_STAGED_PREFIX):]
+    bucket, separator, object_path = payload.partition("/")
+    if not separator or not bucket.strip() or not object_path.strip():
+        raise ValueError("Invalid Supabase storage token format")
+
+    return bucket.strip(), object_path.strip().lstrip("/")
+
+
+def _supabase_storage_request_headers() -> Dict[str, str]:
+    service_role_key = str(settings.supabase_service_role_key or "").strip()
+    if not service_role_key:
+        return {}
+
+    return {
+        "apikey": service_role_key,
+        "Authorization": f"Bearer {service_role_key}",
+    }
+
+
+def _download_supabase_storage_object(bucket: str, object_path: str) -> bytes:
+    supabase_url = str(settings.supabase_url or "").strip().rstrip("/")
+    if not supabase_url:
+        raise RuntimeError("SUPABASE_URL is required to ingest Supabase storage references")
+
+    encoded_bucket = quote(bucket, safe="")
+    encoded_path = quote(object_path, safe="/")
+    url = f"{supabase_url}/storage/v1/object/{encoded_bucket}/{encoded_path}"
+
+    response = requests.get(url, headers=_supabase_storage_request_headers(), timeout=120)
+    if response.status_code == 404:
+        raise FileNotFoundError(f"Supabase object not found: {bucket}/{object_path}")
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Failed to fetch Supabase object {bucket}/{object_path}: "
+            f"{response.status_code} {response.text[:300]}"
+        )
+
+    if not response.content:
+        raise RuntimeError(f"Supabase object {bucket}/{object_path} is empty")
+
+    return response.content
+
+
+def _delete_supabase_storage_object(bucket: str, object_path: str) -> None:
+    supabase_url = str(settings.supabase_url or "").strip().rstrip("/")
+    if not supabase_url:
+        return
+
+    encoded_bucket = quote(bucket, safe="")
+    encoded_path = quote(object_path, safe="/")
+    url = f"{supabase_url}/storage/v1/object/{encoded_bucket}/{encoded_path}"
+    response = requests.delete(url, headers=_supabase_storage_request_headers(), timeout=60)
+
+    # 404 means already deleted; treat as success for cleanup flows.
+    if response.status_code in {200, 204, 404}:
+        return
+
+    raise RuntimeError(
+        f"Failed to delete Supabase object {bucket}/{object_path}: "
+        f"{response.status_code} {response.text[:300]}"
+    )
 
 
 def _set_staged_upload(
@@ -534,7 +629,7 @@ def _remove_staged_upload(token: str) -> Optional[Dict[str, Any]]:
 
 def _normalize_ingestion_path(file_path: str) -> str:
     normalized = str(file_path or "").strip()
-    if _is_staged_upload_token(normalized):
+    if _is_virtual_ingestion_path(normalized):
         return normalized
     candidate = Path(normalized)
     if not candidate.is_absolute():
@@ -809,6 +904,9 @@ async def ingest_documents(
             try:
                 for raw_path in request.file_paths:
                     file_path = _normalize_ingestion_path(raw_path)
+                    staged_upload: Optional[Dict[str, Any]] = None
+                    supabase_bucket: Optional[str] = None
+                    supabase_object_path: Optional[str] = None
 
                     if _is_staged_upload_token(file_path):
                         staged_upload = _get_staged_upload(file_path)
@@ -829,6 +927,27 @@ async def ingest_documents(
                             )
                             continue
                         file_name = str(staged_upload.get("filename") or "uploaded.pdf")
+                    elif _is_supabase_storage_token(file_path):
+                        try:
+                            supabase_bucket, supabase_object_path = _parse_supabase_storage_token(file_path)
+                        except Exception as parse_error:
+                            logger.warning("Ingest: invalid Supabase storage token %s (%s)", file_path, parse_error)
+                            _set_ingestion_status(
+                                file_path,
+                                "failed",
+                                phase="invalid_storage_reference",
+                                message="Invalid Supabase storage reference. Upload the PDF again.",
+                            )
+                            results.append(
+                                {
+                                    "file": file_path,
+                                    "status": "failed",
+                                    "error": "Invalid Supabase storage reference",
+                                }
+                            )
+                            continue
+
+                        file_name = Path(supabase_object_path).name or "uploaded.pdf"
                     else:
                         resolved = Path(file_path)
                         if not resolved.exists():
@@ -888,6 +1007,19 @@ async def ingest_documents(
                                 additional_metadata=request.additional_metadata,
                                 status_callback=status_callback,
                             )
+                        elif _is_supabase_storage_token(file_path):
+                            remote_bytes = _download_supabase_storage_object(
+                                bucket=str(supabase_bucket or ""),
+                                object_path=str(supabase_object_path or ""),
+                            )
+                            result = ingestion_pipeline.ingest_staged_document(
+                                file_bytes=remote_bytes,
+                                file_name=file_name,
+                                staged_identifier=file_path,
+                                document_type=request.document_type,
+                                additional_metadata=request.additional_metadata,
+                                status_callback=status_callback,
+                            )
                         else:
                             result = ingestion_pipeline.ingest_single_document(
                                 file_path=file_path,
@@ -895,6 +1027,13 @@ async def ingest_documents(
                                 additional_metadata=request.additional_metadata,
                                 status_callback=status_callback,
                             )
+                    except Exception as ingestion_error:
+                        logger.error("Ingest: processing failed for %s: %s", file_name, ingestion_error)
+                        result = {
+                            "file": file_name,
+                            "status": "failed",
+                            "error": str(ingestion_error),
+                        }
                     finally:
                         if _is_staged_upload_token(file_path):
                             _remove_staged_upload(file_path)
@@ -1284,6 +1423,61 @@ async def get_db_health(vector_store: Any = Depends(get_vector_store)):
         logger.error(f"DB health check failed: {e}")
         raise HTTPException(status_code=500, detail=f"DB health check failed: {str(e)}")
 
+
+@api_router.post("/upload/reference", response_model=UploadResponse)
+async def stage_supabase_upload_reference(request: UploadReferenceRequest):
+    """Stage a Supabase Storage object path for ingestion.
+
+    Frontend uploads bytes directly to Supabase Storage, then calls this endpoint
+    with bucket + object_path so ingestion can later download from Supabase.
+    """
+    try:
+        document_type = str(request.document_type or "").strip().lower()
+        if document_type not in {"naac_requirement", "mvsr_evidence"}:
+            raise HTTPException(status_code=400, detail="Invalid document_type")
+
+        filename = Path(request.filename or "uploaded.pdf").name
+        if not filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+        bucket = str(request.bucket or settings.supabase_storage_bucket or "").strip()
+        object_path = str(request.object_path or "").strip().lstrip("/")
+        if not bucket:
+            raise HTTPException(status_code=400, detail="Supabase bucket is required")
+        if not object_path:
+            raise HTTPException(status_code=400, detail="Supabase object_path is required")
+
+        stored_path = _create_supabase_storage_token(bucket, object_path)
+
+        _set_ingestion_status(
+            stored_path,
+            "staged",
+            phase="staged",
+            message="File uploaded to Supabase Storage. Waiting for Upload documents.",
+            document_type=document_type,
+            filename=filename,
+            file_size=int(request.file_size or 0),
+            storage_provider="supabase",
+            bucket=bucket,
+            object_path=object_path,
+        )
+
+        return UploadResponse(
+            status="staged",
+            message="File staged via Supabase Storage. Click Upload documents to start chunking.",
+            filename=filename,
+            stored_filename=filename,
+            stored_path=stored_path,
+            document_type=document_type,
+            file_size=int(request.file_size or 0),
+            timestamp=datetime.now().isoformat(),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to stage Supabase upload reference: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to stage upload reference: {str(e)}")
+
 # File upload endpoint
 @api_router.post("/upload")
 async def upload_document(
@@ -1352,6 +1546,25 @@ async def delete_staged_upload(request: StagedUploadDeleteRequest):
             return {
                 "status": "deleted",
                 "message": "Staged upload removed",
+                "stored_path": stored_path,
+                "timestamp": datetime.now().isoformat(),
+            }
+
+        if _is_supabase_storage_token(stored_path):
+            try:
+                bucket, object_path = _parse_supabase_storage_token(stored_path)
+                _delete_supabase_storage_object(bucket, object_path)
+            except Exception as storage_error:
+                logger.warning(
+                    "Could not delete Supabase object for %s during staged cleanup: %s",
+                    stored_path,
+                    storage_error,
+                )
+
+            _remove_ingestion_status(stored_path)
+            return {
+                "status": "deleted",
+                "message": "Supabase-staged upload removed",
                 "stored_path": stored_path,
                 "timestamp": datetime.now().isoformat(),
             }
@@ -1438,6 +1651,7 @@ app.add_api_route("/stats", get_system_statistics, methods=["GET"])
 app.add_api_route("/scheduler/status", get_scheduler_status, methods=["GET"])
 app.add_api_route("/query", query_compliance, methods=["POST"])
 app.add_api_route("/db/health", get_db_health, methods=["GET"])
+app.add_api_route("/upload/reference", stage_supabase_upload_reference, methods=["POST"])
 app.add_api_route("/upload", upload_document, methods=["POST"])
 app.add_api_route("/upload", delete_staged_upload, methods=["DELETE"])
 app.add_api_route("/ingest", ingest_documents, methods=["POST"])
