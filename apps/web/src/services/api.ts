@@ -17,6 +17,21 @@ import {
 class ApiService {
   private api: AxiosInstance
 
+  private shouldAttachAuth(url?: string): boolean {
+    const raw = String(url || '').trim()
+    if (!raw) return true
+
+    const normalized = raw.startsWith('/') ? raw : `/${raw}`
+
+    // Upload + ingest routes are intentionally unauthenticated on the backend.
+    // Avoid sending a stale bearer token that can trigger intermittent 401s.
+    if (normalized === '/upload' || normalized.startsWith('/upload?')) return false
+    if (normalized === '/ingest' || normalized.startsWith('/ingest?')) return false
+    if (normalized === '/ingest/status' || normalized.startsWith('/ingest/status?')) return false
+
+    return true
+  }
+
   constructor() {
     const configuredBaseRaw =
       (import.meta.env.VITE_API_BASE_URL as string | undefined) ||
@@ -42,7 +57,7 @@ class ApiService {
     this.api.interceptors.request.use(
       (config) => {
         const token = sessionStorage.getItem('auth_token')
-        if (token) {
+        if (token && this.shouldAttachAuth(config.url)) {
           const headers = config.headers as any
           if (headers && typeof headers.set === 'function') {
             headers.set('Authorization', `Bearer ${token}`)
@@ -67,6 +82,31 @@ class ApiService {
     this.api.interceptors.response.use(
       (response) => response,
       (error) => {
+        const responseStatus = error?.response?.status
+        const requestUrlRaw = String(error?.config?.url || '').trim()
+        const requestUrl = requestUrlRaw.startsWith('/') ? requestUrlRaw : `/${requestUrlRaw}`
+
+        const isUploadOrIngestRoute =
+          requestUrl === '/upload' ||
+          requestUrl.startsWith('/upload?') ||
+          requestUrl === '/ingest' ||
+          requestUrl.startsWith('/ingest?') ||
+          requestUrl === '/ingest/status' ||
+          requestUrl.startsWith('/ingest/status?')
+
+        // If infrastructure/proxy returns a transient 401 for upload routes,
+        // retry once without Authorization header.
+        if (responseStatus === 401 && isUploadOrIngestRoute && !error?.config?._retryWithoutAuth) {
+          const retryConfig = { ...(error.config || {}), _retryWithoutAuth: true }
+          const headers = retryConfig.headers as any
+          if (headers && typeof headers.delete === 'function') {
+            headers.delete('Authorization')
+          } else if (headers && typeof headers === 'object') {
+            delete headers.Authorization
+          }
+          return this.api.request(retryConfig)
+        }
+
         const apiError: ApiError = {
           detail: error.response?.data?.detail || error.message || 'Unknown error',
           status_code: error.response?.status || 500,
