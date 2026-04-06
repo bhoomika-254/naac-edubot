@@ -56,6 +56,7 @@ frontend/.env.production.local
 apps/web/node_modules/
 apps/web/build/
 apps/web/dist/
+apps/web/.env
 apps/web/.env.local
 apps/web/.env.development.local
 apps/web/.env.test.local
