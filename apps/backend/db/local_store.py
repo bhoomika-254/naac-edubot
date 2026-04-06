@@ -1,24 +1,19 @@
-"""Simple in-memory vector store for local development.
-
-Keeps NAAC and MVSR corpora in Python lists and performs cosine-similarity searches
-using SentenceTransformer embeddings. This avoids heavyweight native dependencies
-while providing enough functionality for demos and tests.
-"""
+"""Simple in-memory vector store for local development and serverless fallback."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import numpy as np
-from sentence_transformers import SentenceTransformer
+from ..embeddings.provider import build_embedder
 
 
 @dataclass
 class _VectorRecord:
     document: str
     metadata: Dict[str, Any]
-    embedding: np.ndarray
+    embedding: List[float]
 
 
 class LocalVectorStore:
@@ -27,11 +22,18 @@ class LocalVectorStore:
     def __init__(
         self,
         embedding_model: str = "all-MiniLM-L6-v2",
+        embedding_provider: str = "simple",
+        embedding_dim: int = 384,
         embedding_device: str = "cpu",
         embedding_batch_size: int = 128,
     ) -> None:
         self.embedding_batch_size = max(int(embedding_batch_size or 128), 8)
-        self.embedder = SentenceTransformer(embedding_model, device=embedding_device)
+        self.embedder = build_embedder(
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model,
+            embedding_dim=embedding_dim,
+            embedding_device=embedding_device,
+        )
         self.naac_records: List[_VectorRecord] = []
         self.mvsr_records: List[_VectorRecord] = []
 
@@ -73,12 +75,17 @@ class LocalVectorStore:
             "total_documents": len(self.naac_records) + len(self.mvsr_records),
         }
 
+    def update_naac_version(self, old_version: str, new_version: str) -> None:
+        """Mark matching NAAC rows as archived for version transitions."""
+        for record in self.naac_records:
+            current_version = str(record.metadata.get("version", "")).strip()
+            if current_version == str(old_version).strip():
+                record.metadata["status"] = "archived"
+                record.metadata["archived_version"] = str(new_version)
+
     def health_check(self) -> Dict[str, Any]:
         stats = self.get_collection_stats()
-        stats.update({
-            "ok": True,
-            "backend": "local-memory",
-        })
+        stats.update({"ok": True, "backend": "local-memory"})
         return stats
 
     def consolidate_single_row_mode(self) -> None:
@@ -104,7 +111,7 @@ class LocalVectorStore:
         for doc, metadata, embedding in zip(documents, metadatas, embeddings, strict=False):
             clean_meta = dict(metadata or {})
             clean_meta.setdefault("type", doc_type)
-            store.append(_VectorRecord(document=doc, metadata=clean_meta, embedding=embedding))
+            store.append(_VectorRecord(document=str(doc), metadata=clean_meta, embedding=embedding))
 
     def _query_records(
         self,
@@ -117,34 +124,57 @@ class LocalVectorStore:
             return {"documents": [], "metadatas": [], "distances": []}
 
         filter_key, filter_value = filter_pair
-        candidates = (
+        candidates = [
             record
             for record in store
             if not filter_value or record.metadata.get(filter_key) == filter_value
-        )
-        candidates = list(candidates)
+        ]
         if not candidates:
             candidates = store
 
         query_embedding = self._encode([query_text])[0]
-        doc_matrix = np.stack([record.embedding for record in candidates])
-        similarities = doc_matrix @ query_embedding / (
-            np.linalg.norm(doc_matrix, axis=1) * np.linalg.norm(query_embedding) + 1e-10
-        )
 
-        top_indices = np.argsort(similarities)[::-1][:n_results]
-        documents = [candidates[idx].document for idx in top_indices]
-        metadatas = [candidates[idx].metadata for idx in top_indices]
-        distances = [float(1 - similarities[idx]) for idx in top_indices]
+        ranked: List[Tuple[float, _VectorRecord]] = []
+        for record in candidates:
+            similarity = self._cosine_similarity(record.embedding, query_embedding)
+            ranked.append((similarity, record))
+
+        ranked.sort(key=lambda row: row[0], reverse=True)
+        top_rows = ranked[: max(int(n_results or 0), 0)]
+
+        documents = [row[1].document for row in top_rows]
+        metadatas = [row[1].metadata for row in top_rows]
+        distances = [float(1 - row[0]) for row in top_rows]
 
         return {"documents": documents, "metadatas": metadatas, "distances": distances}
 
-    def _encode(self, texts: List[str]) -> np.ndarray:
-        return np.asarray(
-            self.embedder.encode(
-                texts,
-                normalize_embeddings=True,
-                batch_size=self.embedding_batch_size,
-                show_progress_bar=False,
-            )
+    def _encode(self, texts: List[str]) -> List[List[float]]:
+        embeddings = self.embedder.encode(
+            texts,
+            normalize_embeddings=True,
+            batch_size=self.embedding_batch_size,
+            show_progress_bar=False,
         )
+
+        if hasattr(embeddings, "tolist"):
+            embeddings = embeddings.tolist()
+
+        return [list(map(float, embedding)) for embedding in embeddings]
+
+    @staticmethod
+    def _cosine_similarity(left: List[float], right: List[float]) -> float:
+        if not left or not right or len(left) != len(right):
+            return 0.0
+
+        dot = 0.0
+        left_norm_sq = 0.0
+        right_norm_sq = 0.0
+        for left_value, right_value in zip(left, right):
+            dot += left_value * right_value
+            left_norm_sq += left_value * left_value
+            right_norm_sq += right_value * right_value
+
+        if left_norm_sq <= 0.0 or right_norm_sq <= 0.0:
+            return 0.0
+
+        return dot / (math.sqrt(left_norm_sq) * math.sqrt(right_norm_sq) + 1e-10)

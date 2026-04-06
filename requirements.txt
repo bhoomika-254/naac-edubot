@@ -6,10 +6,6 @@ uvicorn==0.24.0
 pydantic==2.12.5
 pydantic-settings==2.13.1
 
-# RAG Components
-# Align sentence-transformers with latest huggingface_hub to avoid cached_download import errors
-sentence-transformers==2.7.0
-
 # LLM Integration
 groq>=0.18.0
 huggingface-hub==0.33.4

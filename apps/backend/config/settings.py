@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     
     # Embedding settings
     embedding_model: str = Field("all-MiniLM-L6-v2", env="EMBEDDING_MODEL")
+    embedding_provider: str = Field("simple", env="EMBEDDING_PROVIDER")
     embedding_device: str = Field("cpu", env="EMBEDDING_DEVICE")  # cpu or cuda
     embedding_batch_size: int = Field(128, env="EMBEDDING_BATCH_SIZE")
     vector_insert_batch_size: int = Field(1000, env="VECTOR_INSERT_BATCH_SIZE")

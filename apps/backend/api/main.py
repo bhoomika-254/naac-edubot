@@ -220,6 +220,7 @@ async def initialize_system():
                 db_url=settings.supabase_db_url,
                 table_name=settings.supabase_table,
                 embedding_model=settings.embedding_model,
+                embedding_provider=settings.embedding_provider,
                 embedding_dim=settings.embedding_dim,
                 embedding_device=settings.embedding_device,
                 embedding_batch_size=settings.embedding_batch_size,
@@ -232,6 +233,7 @@ async def initialize_system():
             logger.info("Initializing in-memory vector backend for local usage")
             vector_store = LocalVectorStore(
                 embedding_model=settings.embedding_model,
+                embedding_provider=settings.embedding_provider,
                 embedding_device=settings.embedding_device,
                 embedding_batch_size=settings.embedding_batch_size,
             )
@@ -261,6 +263,7 @@ async def initialize_system():
             memory_store = ConversationMemoryStore(
                 db_url=settings.supabase_db_url,
                 embedding_model=settings.embedding_model,
+                embedding_provider=settings.embedding_provider,
                 embedding_dim=settings.embedding_dim,
                 embedding_device=settings.embedding_device,
                 short_ttl_days=settings.memory_short_ttl_days,

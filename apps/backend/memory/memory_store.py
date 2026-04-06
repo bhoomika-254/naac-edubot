@@ -12,7 +12,8 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import psycopg2
 from psycopg2.extras import Json, execute_batch
-from sentence_transformers import SentenceTransformer
+
+from ..embeddings.provider import build_embedder
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class ConversationMemoryStore:
         self,
         db_url: str,
         embedding_model: str = "all-MiniLM-L6-v2",
+        embedding_provider: str = "simple",
         embedding_dim: int = 384,
         embedding_device: str = "cpu",
         short_ttl_days: int = 7,
@@ -47,7 +49,12 @@ class ConversationMemoryStore:
         self.long_ttl_days = max(long_ttl_days, 1)
         self.short_limit = max(short_limit, 1)
         self.long_top_k = max(long_top_k, 1)
-        self.embedder = SentenceTransformer(embedding_model, device=embedding_device)
+        self.embedder = build_embedder(
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model,
+            embedding_dim=self.embedding_dim,
+            embedding_device=embedding_device,
+        )
 
         self.short_table = "conversation_memory_short"
         self.long_table = "conversation_memory_long"

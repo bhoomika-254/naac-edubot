@@ -95,6 +95,7 @@ def run_checks() -> List[CheckResult]:
             db_url=supabase_url,
             table_name=settings.supabase_table,
             embedding_model=settings.embedding_model,
+            embedding_provider=settings.embedding_provider,
             embedding_dim=settings.embedding_dim,
             embedding_device=settings.embedding_device,
             embedding_batch_size=settings.embedding_batch_size,
@@ -243,6 +244,7 @@ def run_checks() -> List[CheckResult]:
         memory_store = ConversationMemoryStore(
             db_url=supabase_url,
             embedding_model=settings.embedding_model,
+            embedding_provider=settings.embedding_provider,
             embedding_dim=settings.embedding_dim,
             embedding_device=settings.embedding_device,
             short_ttl_days=7,

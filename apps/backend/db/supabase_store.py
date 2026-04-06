@@ -11,7 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 from psycopg2.extras import Json, execute_values
-from sentence_transformers import SentenceTransformer
+
+from ..embeddings.provider import build_embedder
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ class SupabaseVectorStore:
         db_url: str,
         table_name: str = "chunks",
         embedding_model: str = "all-MiniLM-L6-v2",
+        embedding_provider: str = "simple",
         embedding_dim: int = 384,
         embedding_device: str = "cpu",
         embedding_batch_size: int = 128,
@@ -37,11 +39,17 @@ class SupabaseVectorStore:
         self.embedding_dim = embedding_dim
         self.embedding_batch_size = max(int(embedding_batch_size or 128), 8)
         self.insert_batch_size = max(int(insert_batch_size or 1000), 100)
-        self.embedder = SentenceTransformer(embedding_model, device=embedding_device)
+        self.embedder = build_embedder(
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model,
+            embedding_dim=self.embedding_dim,
+            embedding_device=embedding_device,
+        )
 
         logger.info(
-            "Supabase vector store initialized (table=%s, model=%s, dim=%s)",
+            "Supabase vector store initialized (table=%s, provider=%s, model=%s, dim=%s)",
             table_name,
+            embedding_provider,
             embedding_model,
             embedding_dim,
         )
